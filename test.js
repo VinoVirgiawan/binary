@@ -1,0 +1,230 @@
+/**
+ * DRIPNEXT local smoke test — runs the full scenario against the real
+ * API handlers with mocked req/res. No server needed:  node test.js
+ */
+const assert = require('assert');
+
+const store = require('./lib/store');
+
+/* ── Mock req/res ── */
+function mockReq({ method = 'GET', body = null, headers = {}, query = {} } = {}) {
+  return { method, headers, query, body };
+}
+
+function mockRes() {
+  return {
+    statusCode: 200,
+    body: undefined,
+    status(c) { this.statusCode = c; return this; },
+    json(o) { this.body = o; return this; },
+    end() { this.body = this.body ?? ''; return this; },
+    setHeader() {},
+  };
+}
+
+async function call(handler, opts) {
+  const res = await handler(mockReq(opts), mockRes());
+  return { status: res.statusCode, body: res.body };
+}
+
+function authed(token) {
+  // Node/Vercel lowercase incoming header names — mock must match
+  return { headers: { authorization: `Bearer ${token}` } };
+}
+
+let passed = 0;
+const failures = [];
+function t(name, cond) {
+  if (cond) { passed++; console.log(`  ✔ ${name}`); }
+  else { failures.push(name); console.log(`  ✘ ${name}`); }
+}
+
+(async () => {
+  await store.ensureLoaded(); // seeds in-memory state
+
+  const clientAuth = require('./api/auth');
+  const login = require('./api/panel/login');
+  const logout = require('./api/panel/logout');
+  const me = require('./api/panel/me');
+  const stats = require('./api/panel/stats');
+  const accounts = require('./api/panel/accounts');
+  const accountOne = require('./api/panel/accounts/[username].js');
+  const keysApi = require('./api/panel/keys');
+  const keyOne = require('./api/panel/keys/[key].js');
+  const gamesApi = require('./api/panel/games');
+  const gameOne = require('./api/panel/games/[id].js');
+  const activity = require('./api/panel/activity');
+
+  console.log('\n[1] Client auth API basics');
+  let r = await call(clientAuth, { method: 'GET' });
+  t('GET /api/auth health', r.body.status === 'success' && r.body.games.length === 3);
+
+  r = await call(clientAuth, { method: 'POST', body: { key: 'X', device: 'D', game: '' } });
+  t('missing fields rejected', r.body.status === 'error');
+
+  console.log('\n[2] Panel logins');
+  r = await call(login, { method: 'POST', body: { username: 'owner', password: 'WRONG', device: 'dOwner' } });
+  t('wrong password → 401', r.status === 401);
+
+  r = await call(login, { method: 'POST', body: { username: 'owner', password: 'owner123', device: 'dOwner' } });
+  t('owner login ok', r.status === 200 && r.body.token && r.body.account.role === 'owner');
+  const ownerTok = r.body.token;
+
+  r = await call(me, authed(ownerTok));
+  t('me() returns owner + games', r.body.account.username === 'owner' && r.body.games.length === 3);
+
+  console.log('\n[3] Owner creates admin → admin creates reseller');
+  r = await call(accounts, { method: 'POST', ...authed(ownerTok), body: { username: 'boss', password: 'boss123', role: 'admin', credits: 5 } });
+  t('create admin', r.status === 201 && r.body.account.role === 'admin');
+
+  r = await call(login, { method: 'POST', body: { username: 'boss', password: 'boss123', device: 'dAdmin' } });
+  const adminTok = r.body.token;
+  t('admin login ok', r.status === 200);
+
+  r = await call(accounts, { method: 'POST', ...authed(adminTok), body: { username: 'res1', password: 'r1pass', role: 'admin', credits: 5 } });
+  t('admin cannot create admin', r.status === 403);
+
+  r = await call(accounts, { method: 'POST', ...authed(adminTok), body: { username: 'res1', password: 'r1pass', role: 'reseller', credits: 5, expires_days: 7, games: ['mlbb'] } });
+  t('admin creates reseller r1 (7d, mlbb only)', r.status === 201 && r.body.account.games[0] === 'mlbb');
+
+  console.log('\n[4] Reseller one-device login');
+  r = await call(login, { method: 'POST', body: { username: 'res1', password: 'r1pass', device: 'dR1' } });
+  const r1Tok = r.body.token;
+  t('r1 login ok, device bound', r.status === 200 && r.body.account.device === 'dR1');
+
+  r = await call(login, { method: 'POST', body: { username: 'res1', password: 'r1pass', device: 'dR2' } });
+  t('r1 second device blocked (one device login)', r.status === 403);
+
+  r = await call(accountOne, { method: 'PATCH', query: { username: 'res1' }, ...authed(adminTok), body: { device_reset: true } });
+  t('admin resets r1 device', r.status === 200 && r.body.account.device === null);
+
+  r = await call(login, { method: 'POST', body: { username: 'res1', password: 'r1pass', device: 'dR2' } });
+  t('r1 can login on new device after reset', r.status === 200);
+  const r1Tok2 = r.body.token;
+
+  console.log('\n[5] Key generation + credits');
+  r = await call(keysApi, { method: 'POST', ...authed(r1Tok2), body: { mode: 'random', game: 'mlbb', count: 3, duration_days: 30 } });
+  const r1Keys = r.body.created.map((k) => k.key);
+  t('r1 generates 3 keys, 2 credits left', r.status === 201 && r.body.created.length === 3 && r.body.credits_left === 2);
+
+  r = await call(keysApi, { method: 'POST', ...authed(r1Tok2), body: { mode: 'random', game: 'ff', count: 1, duration_days: 30 } });
+  t('r1 blocked from non-permitted game (ff)', r.status === 403);
+
+  r = await call(keysApi, { method: 'POST', ...authed(r1Tok2), body: { mode: 'random', game: 'mlbb', count: 3, duration_days: 30 } });
+  t('r1 not enough credits', r.status === 400 && /Not enough credits/.test(r.body.error));
+
+  r = await call(keysApi, { method: 'POST', ...authed(ownerTok), body: { mode: 'random', game: 'ff', count: 2, duration_days: 30, prefix: 'OWN' } });
+  t('owner generates unlimited (free)', r.status === 201 && r.body.credits_left === 'unlimited');
+
+  r = await call(keysApi, { method: 'POST', ...authed(adminTok), body: { mode: 'custom', game: 'mlbb', keys: 'CUSTOM-ONE\nCUSTOM-TWO', duration_days: 7 } });
+  t('admin custom keys (cost 2 → 3 left)', r.status === 201 && r.body.created.length === 2 && r.body.credits_left === 3);
+
+  console.log('\n[6] Client auth — one device access on keys');
+  const K1 = r1Keys[0];
+  r = await call(clientAuth, { method: 'POST', body: { key: K1, device: 'phoneA', game: 'mlbb' } });
+  t('first login registers device + sets expiry', r.body.status === 'success' && r.body.message === 'Device registered' && r.body.expired);
+
+  r = await call(clientAuth, { method: 'POST', body: { key: K1, device: 'phoneB', game: 'mlbb' } });
+  t('second device rejected (one device access)', r.body.status === 'error' && /another device/.test(r.body.message));
+
+  r = await call(clientAuth, { method: 'POST', body: { key: K1, device: 'phoneA', game: 'ff' } });
+  t('wrong game rejected', r.body.status === 'error' && r.body.message === 'Wrong game key');
+
+  r = await call(clientAuth, { method: 'POST', body: { key: 'NOPE-NOPE-NOPE', device: 'phoneA', game: 'mlbb' } });
+  t('invalid key rejected', r.body.status === 'error' && r.body.message === 'Invalid key');
+
+  console.log('\n[7] Key management (ban/extend/reset device)');
+  r = await call(keyOne, { method: 'PATCH', query: { key: K1 }, ...authed(ownerTok), body: { action: 'ban' } });
+  t('owner bans key', r.status === 200 && r.body.key.status === 'banned');
+  r = await call(clientAuth, { method: 'POST', body: { key: K1, device: 'phoneA', game: 'mlbb' } });
+  t('banned key rejected by client auth', r.body.message === 'Key banned');
+
+  r = await call(keyOne, { method: 'PATCH', query: { key: K1 }, ...authed(ownerTok), body: { action: 'activate' } });
+  t('owner re-activates key', r.body.key.status === 'active');
+
+  const before = store.findKey(K1).expires_at;
+  r = await call(keyOne, { method: 'PATCH', query: { key: K1 }, ...authed(ownerTok), body: { action: 'extend', days: 5 } });
+  t('extend +5 days', Date.parse(r.body.key.expires_at) - Date.parse(before) === 5 * 86400000);
+
+  r = await call(keyOne, { method: 'PATCH', query: { key: K1 }, ...authed(ownerTok), body: { action: 'reset_device' } });
+  t('reset device binding', r.body.key.device === null);
+  r = await call(clientAuth, { method: 'POST', body: { key: K1, device: 'phoneB', game: 'mlbb' } });
+  t('new device can bind after reset (expiry kept)', r.body.status === 'success' && r.body.message === 'Device registered');
+
+  console.log('\n[8] Scoping: who sees what');
+  r = await call(keysApi, authed(ownerTok));
+  t('owner sees all keys (5 + 2 custom = 7)', r.body.keys.length === 7);
+
+  r = await call(keysApi, authed(adminTok));
+  t('admin sees own + reseller keys only (5)', r.body.keys.length === 5);
+
+  r = await call(keysApi, authed(r1Tok2));
+  t('reseller sees only own keys (3)', r.body.keys.length === 3);
+
+  r = await call(keyOne, { method: 'PATCH', query: { key: 'OWN-FF-XXXXXXXX'.replace('XXXXXXXX', 'ZZZZZZZZ') }, ...authed(r1Tok2), body: { action: 'ban' } });
+  t('reseller cannot touch a foreign key', r.status === 404 || r.status === 404);
+
+  console.log('\n[9] Games management');
+  r = await call(gamesApi, { method: 'POST', ...authed(adminTok), body: { id: 'valo', name: 'Valorant' } });
+  t('admin cannot create game', r.status === 403);
+  r = await call(gamesApi, { method: 'POST', ...authed(ownerTok), body: { id: 'valo', name: 'Valorant' } });
+  t('owner adds game', r.status === 201);
+  r = await call(gamesApi, { method: 'POST', ...authed(ownerTok), body: { id: 'valo', name: 'Dup' } });
+  t('duplicate game id rejected', r.status === 409);
+  r = await call(gameOne, { method: 'DELETE', query: { id: 'mlbb' }, ...authed(ownerTok) });
+  t('cannot delete game with keys', r.status === 409);
+  r = await call(gameOne, { method: 'PATCH', query: { id: 'valo' }, ...authed(ownerTok), body: { status: 'disabled' } });
+  t('owner disables game', r.status === 200);
+  r = await call(gameOne, { method: 'DELETE', query: { id: 'valo' }, ...authed(ownerTok) });
+  t('delete unused game ok', r.status === 200);
+
+  console.log('\n[10] Account expiry + ban');
+  const db = store.state();
+  store.findAccount('res1').expires_at = new Date(Date.now() - 1000).toISOString();
+  r = await call(login, { method: 'POST', body: { username: 'res1', password: 'r1pass', device: 'dR2' } });
+  t('expired account blocked at login', r.status === 403 && /expired/.test(r.body.error));
+
+  r = await call(accountOne, { method: 'PATCH', query: { username: 'res1' }, ...authed(ownerTok), body: { clear_expiry: true } });
+  t('owner clears expiry', r.status === 200 && r.body.account.expires_at === null);
+  r = await call(login, { method: 'POST', body: { username: 'res1', password: 'r1pass', device: 'dR2' } });
+  t('login works again', r.status === 200);
+
+  r = await call(accountOne, { method: 'PATCH', query: { username: 'res1' }, ...authed(adminTok), body: { status: 'banned' } });
+  t('admin bans r1', r.status === 200);
+  r = await call(me, authed(r1Tok2));
+  t('banned account session invalidated', r.status === 401);
+  r = await call(accountOne, { method: 'PATCH', query: { username: 'res1' }, ...authed(adminTok), body: { status: 'active', credits: 25 } });
+  t('admin re-activates + credits 25', r.body.account.credits === 25);
+
+  console.log('\n[11] Activity scoping + stats + logout');
+  r = await call(activity, { query: { limit: 500 }, ...authed(ownerTok) });
+  const ownerActs = r.body.activity.length;
+  t('owner sees activity', ownerActs > 10);
+
+  // res1's old token died when the account was banned — log in again
+  r = await call(login, { method: 'POST', body: { username: 'res1', password: 'r1pass', device: 'dR2' } });
+  t('res1 re-login after re-activation', r.status === 200);
+  const r1Tok3 = r.body.token;
+
+  r = await call(activity, authed(r1Tok3));
+  t('reseller activity scoped to own actor/keys',
+    r.body.activity.every((e) => e.actor === 'res1' || (e.key_owner && e.key_owner === 'res1')));
+
+  r = await call(stats, authed(ownerTok));
+  t('owner stats have admin+reseller counts', r.body.stats.accounts_admins >= 1 && r.body.stats.accounts_resellers >= 1);
+
+  r = await call(logout, { method: 'POST', ...authed(r1Tok3) });
+  t('logout ok', r.body.ok === true);
+  r = await call(me, authed(r1Tok3));
+  t('token dead after logout', r.status === 401);
+
+  console.log(`\n════════════════════════════`);
+  console.log(`PASSED: ${passed}  FAILED: ${failures.length}`);
+  if (failures.length) {
+    console.log('Failed:', failures);
+    process.exit(1);
+  }
+})().catch((e) => {
+  console.error('HARNESS ERROR:', e);
+  process.exit(1);
+});
