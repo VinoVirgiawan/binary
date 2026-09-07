@@ -1,11 +1,11 @@
 'use strict';
 
 /* ═══════════════════════════════════════════════════════════
-   DRIPNEXT panel — vanilla JS SPA (no build, no dependencies)
+   Kitsune Panel — vanilla JS SPA (no build, no dependencies)
    ═══════════════════════════════════════════════════════════ */
 
 const S = {
-  token: localStorage.getItem('dripnext_token') || '',
+  token: localStorage.getItem('kitsune_token') || '',
   me: null,
   games: [],
   tab: 'dashboard',
@@ -108,12 +108,12 @@ function openModal(title, bodyHtml, onSubmit, submitLabel = 'Save') {
 }
 
 function deviceId() {
-  let d = localStorage.getItem('dripnext_device');
+  let d = localStorage.getItem('kitsune_device');
   if (!d) {
     const b = new Uint8Array(16);
     crypto.getRandomValues(b);
     d = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
-    localStorage.setItem('dripnext_device', d);
+    localStorage.setItem('kitsune_device', d);
   }
   return d;
 }
@@ -145,7 +145,7 @@ function doLogout(silent) {
   if (!silent && S.token) api('/logout', { method: 'POST' }).catch(() => {});
   S.token = '';
   S.me = null;
-  localStorage.removeItem('dripnext_token');
+  localStorage.removeItem('kitsune_token');
   renderLogin();
 }
 
@@ -154,8 +154,8 @@ function renderLogin() {
     <div class="login-wrap">
       <div class="login-card">
         <div class="brand">
-          <div class="logo">⚡</div>
-          <div><b>DRIPNEXT</b><small>Key Management Panel</small></div>
+          <div class="logo">🦊</div>
+          <div><b>KITSUNE</b><small>Key Management Panel</small></div>
         </div>
         <div class="login-sub">Sign in to your account</div>
         <form id="login-form">
@@ -182,7 +182,7 @@ function renderLogin() {
       }).then((r) => r.json());
       if (d.token) {
         S.token = d.token;
-        localStorage.setItem('dripnext_token', d.token);
+        localStorage.setItem('kitsune_token', d.token);
         await boot();
       } else {
         errBox.textContent = d.error || 'Login failed';
@@ -227,7 +227,7 @@ function renderApp() {
   $('#app').innerHTML = `
     <div class="layout">
       <aside class="sidebar">
-        <div class="brand"><div class="logo">⚡</div><div><b>DRIPNEXT</b><small>Key Management</small></div></div>
+        <div class="brand"><div class="logo">🦊</div><div><b>KITSUNE</b><small>Key Management</small></div></div>
         ${nav}
         <div class="side-spacer"></div>
         <div class="user-card">
@@ -808,7 +808,7 @@ async function boot() {
     renderApp();
   } catch {
     S.token = '';
-    localStorage.removeItem('dripnext_token');
+    localStorage.removeItem('kitsune_token');
     renderLogin();
   }
 }
