@@ -7,8 +7,8 @@ const assert = require('assert');
 const store = require('./lib/store');
 
 /* ── Mock req/res ── */
-function mockReq({ method = 'GET', body = null, headers = {}, query = {} } = {}) {
-  return { method, headers, query, body };
+function mockReq({ method = 'GET', body = null, headers = {}, query = {}, url = '/api/x' } = {}) {
+  return { method, headers, query, body, url };
 }
 
 function mockRes() {
@@ -42,18 +42,19 @@ function t(name, cond) {
 (async () => {
   await store.ensureLoaded(); // seeds in-memory state
 
-  const clientAuth = require('./api/auth');
-  const login = require('./api/panel/login');
-  const logout = require('./api/panel/logout');
-  const me = require('./api/panel/me');
-  const stats = require('./api/panel/stats');
-  const accounts = require('./api/panel/accounts');
-  const accountOne = require('./api/panel/accounts/[username].js');
-  const keysApi = require('./api/panel/keys');
-  const keyOne = require('./api/panel/keys/[key].js');
-  const gamesApi = require('./api/panel/games');
-  const gameOne = require('./api/panel/games/[id].js');
-  const activity = require('./api/panel/activity');
+  const clientAuth = require('./handlers/clientAuth');
+  const login = require('./handlers/panel/login');
+  const logout = require('./handlers/panel/logout');
+  const me = require('./handlers/panel/me');
+  const stats = require('./handlers/panel/stats');
+  const accounts = require('./handlers/panel/accounts');
+  const accountOne = require('./handlers/panel/accounts/[username].js');
+  const keysApi = require('./handlers/panel/keys');
+  const keyOne = require('./handlers/panel/keys/[key].js');
+  const gamesApi = require('./handlers/panel/games');
+  const gameOne = require('./handlers/panel/games/[id].js');
+  const activity = require('./handlers/panel/activity');
+  const router = require('./api/[[...path]].js');
 
   console.log('\n[1] Client auth API basics');
   let r = await call(clientAuth, { method: 'GET' });
@@ -217,6 +218,30 @@ function t(name, cond) {
   t('logout ok', r.body.ok === true);
   r = await call(me, authed(r1Tok3));
   t('token dead after logout', r.status === 401);
+
+  console.log('\n[12] Catch-all router (single lambda — the Vercel 401 fix)');
+  r = await call(router, { method: 'GET', url: '/api/auth' });
+  t('router: /api/auth health', r.body.status === 'success');
+
+  r = await call(router, { method: 'POST', url: '/api/panel/login', body: { username: 'owner', password: 'owner123', device: 'dOwner' } });
+  t('router: login works (same bound device)', r.status === 200 && r.body.token);
+  const routerTok = r.body.token;
+
+  r = await call(router, { method: 'GET', url: '/api/panel/me', headers: { authorization: `Bearer ${routerTok}` } });
+  t('router: /api/panel/me works after login (no 401)', r.status === 200 && r.body.account.username === 'owner');
+
+  r = await call(router, { method: 'POST', url: '/api/panel/keys', headers: { authorization: `Bearer ${routerTok}` }, body: { mode: 'random', game: 'pubg', count: 2, duration_days: 1 } });
+  t('router: generate keys via POST /api/panel/keys', r.status === 201 && r.body.created.length === 2);
+  const rk = r.body.created[0].key;
+
+  r = await call(router, { method: 'PATCH', url: `/api/panel/keys/${encodeURIComponent(rk)}`, headers: { authorization: `Bearer ${routerTok}` }, body: { action: 'extend', days: 3 } });
+  t('router: PATCH /api/panel/keys/:key', r.status === 200 && r.body.key.duration_days === 4);
+
+  r = await call(router, { method: 'GET', url: '/api/panel/keys?limit=5', headers: { authorization: `Bearer ${routerTok}` } });
+  t('router: query params parsed', r.status === 200 && r.body.keys.length >= 2);
+
+  r = await call(router, { method: 'GET', url: '/api/panel/unknown' });
+  t('router: unknown route → 404', r.status === 404);
 
   console.log(`\n════════════════════════════`);
   console.log(`PASSED: ${passed}  FAILED: ${failures.length}`);

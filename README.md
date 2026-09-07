@@ -1,4 +1,4 @@
-# ⚡ DRIPNEXT — Key Management Panel for Vercel
+# 🦊 Kitsune Panel — Key Management Panel for Vercel
 
 Multi-role key system (Owner → Admin → Reseller) + client auth API. Zero npm dependencies — deploys to Vercel as-is.
 
@@ -44,6 +44,14 @@ npx vercel --prod   # production
 ```
 
 Tidak ada environment variable wajib. Panel terbuka di `/`, client API di `/api/auth` (alias `/auth`).
+
+**Arsitektur**: semua endpoint berjalan di **satu** serverless function (`api/[[...path]].js`) yang me-routing ke `handlers/`. Ini penting — kalau tiap endpoint jadi function terpisah, tiap function punya memori sendiri dan session/state terpecah (gejala: 401 random di `/api/panel/me`).
+
+Env variables opsional:
+
+```
+PANEL_SECRET = <string acak>   # kunci signing token login (disarankan diisi)
+```
 
 ## Client Auth API (untuk client game)
 
@@ -127,5 +135,5 @@ Buatnya: daftar gratis di [upstash.com](https://upstash.com) → buat Redis data
 ## Test lokal
 
 ```bash
-node test.js   # 50 assertions: role, credits, one-device, expiry, scoping, games
+node test.js   # 57 assertions: role, credits, one-device, expiry, scoping, games, router
 ```

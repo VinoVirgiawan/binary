@@ -2,7 +2,7 @@
   "name": "vercel-nextpanel",
   "version": "1.0.0",
   "private": true,
-  "description": "DRIPNEXT — Multi-role key management panel (Owner / Admin / Reseller) + client auth API for Vercel",
+  "description": "Kitsune Panel — Multi-role key management panel (Owner / Admin / Reseller) + client auth API for Vercel",
   "main": "api/auth.js",
   "scripts": {
     "dev": "vercel dev",
